@@ -72,10 +72,17 @@ def api_trends():
         iot_df = tr.interest_over_time(keyword, geo=geo, timeframe=timeframe)
         interest_over_time = _series_to_list(iot_df, keyword)
 
-        try:
-            region_df = tr.interest_by_region(keyword, geo=geo, resolution="CITY", timeframe=timeframe)
-        except Exception:
-            region_df = tr.interest_by_region(keyword, geo=geo, resolution="REGION", timeframe=timeframe)
+        region_df = None
+        for tf in [timeframe, "today 5-d", "today 1-m"]:
+            for resolution in ["CITY", "REGION"]:
+                try:
+                    region_df = tr.interest_by_region(keyword, geo=geo, resolution=resolution, timeframe=tf)
+                    if region_df is not None and not region_df.empty:
+                        break
+                except Exception:
+                    region_df = None
+            if region_df is not None and not region_df.empty:
+                break
         top_cities = _region_to_list(region_df, keyword)
 
         rising = []
