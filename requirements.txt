@@ -1,5 +1,6 @@
 flask
-flask-cors 
-trendspy 
-pandas 
+flask-cors
+trendspy
+pandas
 gunicorn
+requests
