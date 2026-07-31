@@ -11,11 +11,18 @@ from flask_cors import CORS
 from trendspy import Trends
 import traceback
 import time
+import os
+import requests
 
 app = Flask(__name__)
 # Libera chamadas de outros domínios (ex: seu painel hospedado no Lovable)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 tr = Trends()
+
+# Chave da API do FastMoss (produtos virais do TikTok Shop).
+# Configurada como variável de ambiente no Render, nunca escrita direto no código.
+FASTMOSS_API_KEY = os.environ.get("FASTMOSS_API_KEY", "")
+FASTMOSS_BASE_URL = "https://openapi.fastmoss.com"
 
 # Cache simples em memória: guarda o resultado de cada busca por um tempo,
 # assim buscas repetidas do mesmo termo não batem no Google de novo
@@ -81,11 +88,9 @@ def api_trends():
         return jsonify(cached["data"])
 
     try:
-        # Evolução do interesse ao longo do tempo
         iot_df = tr.interest_over_time(keyword, geo=geo, timeframe=timeframe)
         interest_over_time = _series_to_list(iot_df, keyword)
 
-        # Ranking de cidades mais interessadas nesse termo
         region_df = None
         for tf in [timeframe, "today 5-d", "today 1-m"]:
             for resolution in ["CITY", "REGION"]:
@@ -99,7 +104,6 @@ def api_trends():
                 break
         top_cities = _region_to_list(region_df, keyword)
 
-        # Buscas relacionadas em alta (bônus, se disponível)
         rising = []
         try:
             related = tr.related_queries(keyword, geo=geo, timeframe=timeframe)
@@ -127,6 +131,63 @@ def api_trends():
     except Exception as exc:
         traceback.print_exc()
         return jsonify({"error": f"Não foi possível consultar o Google Trends agora: {exc}"}), 502
+
+
+@app.route("/api/tiktok-trending")
+def tiktok_trending():
+    """Produtos mais vendidos/virais do TikTok Shop, via FastMoss OpenAPI."""
+    if not FASTMOSS_API_KEY:
+        return jsonify({"error": "FASTMOSS_API_KEY não configurada no servidor."}), 500
+
+    region = (request.args.get("region") or "BR").upper()
+    limit = min(int(request.args.get("limit", 10)), 20)
+
+    cache_key = f"tiktok|{region}|{limit}"
+    cached = _CACHE.get(cache_key)
+    if cached and (time.time() - cached["ts"]) < _CACHE_TTL_SECONDS:
+        return jsonify(cached["data"])
+
+    try:
+        resp = requests.post(
+            f"{FASTMOSS_BASE_URL}/product/v1/rank/topSelling",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {FASTMOSS_API_KEY}",
+            },
+            json={
+                "filter": {"region": region},
+                "orderby": [{"field": "gmv", "order": "desc"}],
+                "page": 1,
+                "pagesize": limit,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+
+        if payload.get("code") != 0:
+            return jsonify({"error": payload.get("message", "Erro retornado pelo FastMoss."), "raw": payload}), 502
+
+        items = payload.get("data", {}).get("list", [])
+        products = [{
+            "id": item.get("product_id"),
+            "title": item.get("title"),
+            "price": item.get("real_price"),
+            "units_sold": item.get("units_sold"),
+            "gmv": item.get("gmv"),
+            "growth_rate": item.get("growth_rate"),
+        } for item in items]
+
+        result = {"region": region, "products": products}
+        _CACHE[cache_key] = {"ts": time.time(), "data": result}
+        return jsonify(result)
+
+    except requests.exceptions.HTTPError as exc:
+        traceback.print_exc()
+        return jsonify({"error": f"FastMoss recusou a requisição: {exc}", "detail": resp.text[:500]}), 502
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": f"Não foi possível consultar o FastMoss agora: {exc}"}), 502
 
 
 if __name__ == "__main__":
